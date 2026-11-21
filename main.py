@@ -10,17 +10,37 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, User
 from faster_whisper import WhisperModel
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    stream=sys.stdout,
+
+class UserFormatter(logging.Formatter):
+    @staticmethod
+    def _format_arg(arg):
+        if isinstance(arg, User):
+            name = f"@{arg.username}" if arg.username else arg.full_name
+            return f"User({arg.id}, {name})"
+        return arg
+
+    def format(self, record: logging.LogRecord) -> str:
+        if record.args:
+            if isinstance(record.args, tuple):
+                record.args = tuple(self._format_arg(a) for a in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {k: self._format_arg(v) for k, v in record.args.items()}
+        return super().format(record)
+
+
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(
+    UserFormatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 )
+logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
 
@@ -75,7 +95,7 @@ async def temp_audio_file(suffix: str = ".ogg"):
 async def handle_start(message: Message):
     user = message.from_user
     is_allowed = user.id in settings.allowed_users
-    logger.info("Команда /start от user_id=%s (@%s), доступ=%s", user.id, user.username, is_allowed)
+    logger.info("Команда /start от %s, доступ=%s", user, is_allowed)
 
     text = f"👋 Привет!\n\nТвой Telegram ID: <code>{user.id}</code>"
     if not is_allowed:
@@ -95,8 +115,8 @@ async def handle_audio(message: Message):
 
     media = message.voice or message.video_note or message.audio
     logger.info(
-        "Получено аудио от user_id=%s (@%s), длительность=%s сек, file_id=%s",
-        user.id, user.username, getattr(media, "duration", "unknown"), media.file_id
+        "Получено аудио от %s, длительность=%s сек, file_id=%s",
+        user, getattr(media, "duration", "unknown"), media.file_id,
     )
 
     status_msg = await message.reply("⏳ В очереди на расшифровку...")
@@ -123,7 +143,7 @@ async def handle_audio(message: Message):
 
                 text = "".join(segment.text for segment in segments).strip()
 
-            logger.info("Расшифровка завершена для user_id=%s (символов: %d)", user.id, len(text))
+            logger.info("Расшифровка завершена для %s (символов: %d)", user, len(text))
 
             if text:
                 for i in range(0, len(text), 4000):
@@ -136,7 +156,7 @@ async def handle_audio(message: Message):
                 await status_msg.edit_text("❌ Речь не распознана.")
 
         except Exception as e:
-            logger.exception("Ошибка при обработке аудио от user_id=%s", user.id)
+            logger.exception("Ошибка при обработке аудио от %s", user)
             await status_msg.edit_text(f"⚠️ Ошибка: {e}", parse_mode=None)
 
 

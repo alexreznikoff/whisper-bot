@@ -1,12 +1,27 @@
 import asyncio
+import logging
 import os
+import sys
 import tempfile
+
 from contextlib import asynccontextmanager
+
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
 from aiogram.types import Message
 from faster_whisper import WhisperModel
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+)
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -23,21 +38,29 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+if not settings.allowed_users:
+    raise ValueError("Пустой allowed_users. Ограничь доступ!")
+
+
+logger.info("Загрузка модели Whisper '%s' (device=cpu, int8)...", settings.whisper_model)
 model = WhisperModel(
     settings.whisper_model,
     device="cpu",
     compute_type="int8",
     cpu_threads=1
 )
+logger.info("Модель успешно загружена.")
 
-bot = Bot(token=settings.bot_token.get_secret_value())
+bot = Bot(
+    token=settings.bot_token.get_secret_value(),
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
 dp = Dispatcher()
 semaphore = asyncio.Semaphore(1)
 
 
 @asynccontextmanager
 async def temp_audio_file(suffix: str = ".ogg"):
-    """Создает временный файл и гарантированно удаляет его при выходе из блока with."""
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp_path = tmp.name
     tmp.close()
@@ -48,16 +71,38 @@ async def temp_audio_file(suffix: str = ".ogg"):
             os.remove(tmp_path)
 
 
+@dp.message(CommandStart())
+async def handle_start(message: Message):
+    user = message.from_user
+    is_allowed = user.id in settings.allowed_users
+    logger.info("Команда /start от user_id=%s (@%s), доступ=%s", user.id, user.username, is_allowed)
+
+    text = f"👋 Привет!\n\nТвой Telegram ID: <code>{user.id}</code>"
+    if not is_allowed:
+        text += "\n\n⛔️ Нет доступа к боту."
+    else:
+        text += "\n\nПерешли мне голосовое сообщение, «кружок» или аудиофайл — я переведу их в текст."
+
+    await message.answer(text)
+
+
 @dp.message(F.voice | F.video_note | F.audio)
 async def handle_audio(message: Message):
-    if settings.allowed_users and message.from_user.id not in settings.allowed_users:
+    user = message.from_user
+    if user.id not in settings.allowed_users:
+        logger.warning("Отказ в доступе для user_id=%s (@%s)", user.id, user.username)
         return
+
+    media = message.voice or message.video_note or message.audio
+    logger.info(
+        "Получено аудио от user_id=%s (@%s), длительность=%s сек, file_id=%s",
+        user.id, user.username, getattr(media, "duration", "unknown"), media.file_id
+    )
 
     status_msg = await message.reply("⏳ В очереди на расшифровку...")
 
     async with semaphore:
         await status_msg.edit_text("🎙 Расшифровываю...")
-        media = message.voice or message.video_note or message.audio
         file_info = await bot.get_file(media.file_id)
 
         try:
@@ -72,27 +117,31 @@ async def handle_audio(message: Message):
                         language="ru",
                         beam_size=2,
                         vad_filter=True,
-                        condition_on_previous_text=False
+                        condition_on_previous_text=False,
                     )
                 )
 
                 text = "".join(segment.text for segment in segments).strip()
 
+            logger.info("Расшифровка завершена для user_id=%s (символов: %d)", user.id, len(text))
+
             if text:
                 for i in range(0, len(text), 4000):
                     chunk = text[i:i + 4000]
                     if i == 0:
-                        await status_msg.edit_text(chunk)
+                        await status_msg.edit_text(chunk, parse_mode=None)
                     else:
-                        await message.reply(chunk)
+                        await message.reply(chunk, parse_mode=None)
             else:
                 await status_msg.edit_text("❌ Речь не распознана.")
 
         except Exception as e:
-            await status_msg.edit_text(f"⚠️ Ошибка: {e}")
+            logger.exception("Ошибка при обработке аудио от user_id=%s", user.id)
+            await status_msg.edit_text(f"⚠️ Ошибка: {e}", parse_mode=None)
 
 
 async def main():
+    logger.info("Запуск polling...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 

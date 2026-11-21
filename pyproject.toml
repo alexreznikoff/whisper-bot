@@ -1,11 +1,12 @@
 [project]
 name = "whisperbot"
 version = "0.1.0"
-description = "Add your description here"
+description = "Telegram Voice-to-Text bot using Faster-Whisper"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "aiogram>=3.33.0",
+    "av==18.1.0",
     "faster-whisper>=1.2.1",
     "pydantic-settings>=2.16.3",
 ]

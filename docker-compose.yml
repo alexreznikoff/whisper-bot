@@ -1,0 +1,17 @@
+services:
+  whisper-bot:
+    build: .
+    container_name: whisper_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - whisper_cache:/root/.cache/huggingface
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  whisper_cache:

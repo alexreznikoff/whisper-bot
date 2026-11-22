@@ -11,9 +11,11 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import Message, User
-from faster_whisper import WhisperModel
+from groq import AsyncGroq
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+MAX_FILE_SIZE = 25 * 1024 * 1024
 
 
 class UserFormatter(logging.Formatter):
@@ -45,10 +47,9 @@ logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
-    bot_token: SecretStr
-    allowed_users: list[int] = []
-    whisper_model: str = "medium"
-
+    BOT_TOKEN: SecretStr
+    ALLOWED_USERS: list[int] = []
+    GROQ_API_KEY: SecretStr
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -58,29 +59,21 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-if not settings.allowed_users:
+if not settings.ALLOWED_USERS:
     raise ValueError("Пустой allowed_users. Ограничь доступ!")
 
 
-logger.info("Загрузка модели Whisper '%s' (device=cpu, int8)...", settings.whisper_model)
-model = WhisperModel(
-    settings.whisper_model,
-    device="cpu",
-    compute_type="int8",
-    cpu_threads=1
-)
-logger.info("Модель успешно загружена.")
-
 bot = Bot(
-    token=settings.bot_token.get_secret_value(),
+    token=settings.BOT_TOKEN.get_secret_value(),
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
 semaphore = asyncio.Semaphore(1)
+groq = AsyncGroq(api_key=settings.GROQ_API_KEY.get_secret_value())
 
 
 @asynccontextmanager
-async def temp_audio_file(suffix: str = ".ogg"):
+async def _tmp_audio_file(suffix: str = ".ogg"):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp_path = tmp.name
     tmp.close()
@@ -91,10 +84,22 @@ async def temp_audio_file(suffix: str = ".ogg"):
             os.remove(tmp_path)
 
 
+async def _get_transcription(file_path: str) -> str:
+    with open(file_path, "rb") as audio_file:
+        transcription = await groq.audio.transcriptions.create(
+            file=(file_path, audio_file.read()),
+            model="whisper-large-v3-turbo",
+            language="ru",
+            response_format="text",
+        )
+
+    return transcription.strip() or "❌ Не удалось распознать речь."
+
+
 @dp.message(CommandStart())
 async def handle_start(message: Message):
     user = message.from_user
-    is_allowed = user.id in settings.allowed_users
+    is_allowed = user.id in settings.ALLOWED_USERS
     logger.info("Команда /start от %s, доступ=%s", user, is_allowed)
 
     text = f"👋 Привет!\n\nТвой Telegram ID: <code>{user.id}</code>"
@@ -109,15 +114,23 @@ async def handle_start(message: Message):
 @dp.message(F.voice | F.video_note | F.audio)
 async def handle_audio(message: Message):
     user = message.from_user
-    if user.id not in settings.allowed_users:
-        logger.warning("Отказ в доступе для user_id=%s (@%s)", user.id, user.username)
+    if user.id not in settings.ALLOWED_USERS:
+        logger.warning("Отказ в доступе для %s", user)
         return
 
     media = message.voice or message.video_note or message.audio
+    if media is None:
+        logger.warning("Отсутствует аудиофайл")
+        return
+
     logger.info(
-        "Получено аудио от %s, длительность=%s сек, file_id=%s",
+        "Получено аудио от %s, длительность=%s сек",
         user, getattr(media, "duration", "unknown"), media.file_id,
     )
+
+    if media.file_size is not None and media.file_size > MAX_FILE_SIZE:
+        await message.reply("Файл слишком большой: лимит — 25 МБ.")
+        return
 
     status_msg = await message.reply("⏳ В очереди на расшифровку...")
 
@@ -126,34 +139,16 @@ async def handle_audio(message: Message):
         file_info = await bot.get_file(media.file_id)
 
         try:
-            async with temp_audio_file(suffix=".ogg") as file_path:
+            async with _tmp_audio_file(suffix=".ogg") as file_path:
                 await bot.download_file(file_info.file_path, file_path)
+                text = await _get_transcription(file_path)
 
-                loop = asyncio.get_running_loop()
-                segments, _ = await loop.run_in_executor(
-                    None,
-                    lambda: model.transcribe(
-                        file_path,
-                        language="ru",
-                        beam_size=2,
-                        vad_filter=True,
-                        condition_on_previous_text=False,
-                    )
-                )
-
-                text = "".join(segment.text for segment in segments).strip()
-
-            logger.info("Расшифровка завершена для %s (символов: %d)", user, len(text))
-
-            if text:
-                for i in range(0, len(text), 4000):
-                    chunk = text[i:i + 4000]
-                    if i == 0:
-                        await status_msg.edit_text(chunk, parse_mode=None)
-                    else:
-                        await message.reply(chunk, parse_mode=None)
+            if len(text) <= 4096:
+                await status_msg.edit_text(text)
             else:
-                await status_msg.edit_text("❌ Речь не распознана.")
+                await status_msg.delete()
+                for i in range(0, len(text), 4096):
+                    await message.answer(text[i:i + 4096])
 
         except Exception as e:
             logger.exception("Ошибка при обработке аудио от %s", user)

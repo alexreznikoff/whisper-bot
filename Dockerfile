@@ -16,7 +16,6 @@ FROM python:3.14.10-slim-trixie
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    HF_HOME=/root/.cache/huggingface \
     PATH="/app/.venv/bin:$PATH"
 
 RUN apt-get update && \

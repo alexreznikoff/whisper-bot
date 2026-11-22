@@ -123,10 +123,7 @@ async def handle_audio(message: Message):
         logger.warning("Отсутствует аудиофайл")
         return
 
-    logger.info(
-        "Получено аудио от %s, длительность=%s сек",
-        user, getattr(media, "duration", "unknown"), media.file_id,
-    )
+    logger.info("Получено аудио от %s, длительность=%s сек", user, getattr(media, "duration", "unknown"))
 
     if media.file_size is not None and media.file_size > MAX_FILE_SIZE:
         await message.reply("Файл слишком большой: лимит — 25 МБ.")

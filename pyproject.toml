@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "aiogram>=3.33.0",
-    "av==18.1.0",
-    "faster-whisper>=1.2.1",
+    "groq>=1.7.0",
     "pydantic-settings>=2.16.3",
 ]
